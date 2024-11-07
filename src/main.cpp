@@ -1,20 +1,28 @@
 #include <Arduino.h>
 
 // put function declarations here:
-int myFunction(int, int);
+
+#define LASER 15
+#define LDR 2
+#define BUZZER 5
 
 void setup() {
   // put your setup code here, to run once:
-  int result = myFunction(2, 3);
   Serial.begin(115200);
-  Serial.println(result);
+  pinMode(LASER, OUTPUT);
+  pinMode(LDR, INPUT);
+
+  delay(500);
+  digitalWrite(LASER, HIGH);
 }
 
 void loop() {
   // put your main code here, to run repeatedly:
-}
+  int ldr = analogRead(2);
+  Serial.println("light sensor: " + String(ldr));
 
-// put function definitions here:
-int myFunction(int x, int y) {
-  return x + y;
+  if (ldr < 250) { tone(BUZZER, 100); } 
+  if (ldr >= 250) { noTone(BUZZER); }
+
+  delay(100);
 }
