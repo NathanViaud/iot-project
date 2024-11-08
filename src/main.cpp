@@ -1,20 +1,31 @@
 #include <Arduino.h>
 #include <HCSR04.h>
 #include <WiFi.h>
-#include <WebServer.h>
 #include <ArduinoJson.h>
+#include <PubSubClient.h>
 
-const char* ssid = "Sweetjuju";
-const char* password = "jujulien38";
+// Wifi credientials
+const char* ssid = "Pixel_4255";
+const char* password = "aaaaaaaa";
 
-WebServer server(80);
+// MQTT Broker settings
+const char* mqtt_broker = "broker.hivemq.com";
+const int mqtt_port = 1883;
+const char* mqtt_topic_distance = "bat-radar/distance";
+const char* mqtt_topic_led = "bat-radar/led";
+
+WiFiClient espClient;
+PubSubClient client(espClient);
 
 uint16_t getBlinkFrequency(int distance);
+void callback(char* topic, byte* payload, unsigned int length);
+void reconnect();
+void publishSensorData(int distance, unsigned int collisions);
 void updateLED();
-void handleRoot();
-void handleData();
+
 
 const uint8_t PIN_LED = 5;
+const uint8_t PIN_LED2 = 18;
 const uint8_t PIN_TRIGGER = 15;
 const uint8_t PIN_ECHO = 4;
 const uint8_t DISTANCE_MULTIPLIER = 20;
@@ -37,7 +48,6 @@ const uint16_t BLINK_FREQUENCIES[NUM_RANGES] = {
     2000
 };
 
-
 UltraSonicDistanceSensor distanceSensor(15, 4);
 unsigned long lastSensorRead = 0;
 unsigned long lastBlink = 0;
@@ -49,6 +59,7 @@ bool collided = false;
 
 void setup() {
     pinMode(PIN_LED, OUTPUT);
+    pinMode(PIN_LED2, OUTPUT);
     Serial.begin(115200);
   
     // Setup Wifi
@@ -66,12 +77,11 @@ void setup() {
     Serial.println("IP address: ");
     Serial.println(WiFi.localIP());
     
-    // Setup server routes
-    server.on("/", handleRoot);
-    server.on("/data", handleData);
-    
-    server.begin();
-    Serial.println("HTTP server started");
+    // Setup MQTT
+    client.setServer(mqtt_broker, mqtt_port);
+    client.setCallback(callback);
+    client.setBufferSize(512);
+
 }
 
 
@@ -86,24 +96,13 @@ uint16_t getBlinkFrequency(int distance) {
     
     return BLINK_FREQUENCIES[rangeIndex];
 }
-
-void updateLED() {
-    if (currentBlinkInterval == 0) { 
-        digitalWrite(PIN_LED, LOW);
-        return;
-    }
-
-    unsigned long currentMillis = millis();
-    
-    if (currentMillis - lastBlink >= currentBlinkInterval) {
-        ledState = !ledState;
-        digitalWrite(PIN_LED, ledState ? HIGH : LOW);
-        lastBlink = currentMillis;
-    }
-}
  
 void loop() {
-    server.handleClient();
+    client.loop();
+
+    if (!client.connected()) {
+        reconnect();
+    }
 
     unsigned long currentMillis = millis();
 
@@ -115,75 +114,76 @@ void loop() {
             collided = true; 
         } else if (collided && lastDistance > 0) { collided = false; }
 
+        publishSensorData(lastDistance, collisions);
         lastSensorRead = currentMillis;
     }
 
     updateLED();
 }
 
-void handleRoot() {
-    String html = R"(
-    <!DOCTYPE html>
-    <html>
-        <head>
-            <title>Bat radar</title>
-            <meta name="viewport" content="width=device-width, initial-scale=1">
-            <link rel="stylesheet" href="https://unpkg.com/tailwindcss@2.2.19/dist/tailwind.min.css" />
-            <script>
-                function updateData() {
-                    fetch('/data')
-                        .then(response => response.json())
-                        .then(data => {
-                            document.getElementById('distance').innerHTML = 
-                                'Distance: ' + data.distance + ' cm';
-                            document.getElementById('collisions').innerHTML = data.collisions;
+void callback(char* topic, byte* payload, unsigned int length) {
+    String message;
+    for (int i = 0; i < length; i++) {
+        message += (char)payload[i];
+    }
 
-                            let color = "#14b8a6"
-                            if (data.distance < 25) {
-                                color = "#ef4444";
-                            } else if (data.distance < 50) {
-                                color = "#f59e0b";
-                            }
-
-                            const distanceBar = document.getElementById('distance-bar');
-                            distanceBar.style = 'width: ' + data['distance-bar'] + '%';
-                            distanceBar.style.backgroundColor = color;
-                        });
-                }
-                setInterval(updateData, 500);
-            </script>
-        </head>
-        <body class="text-center p-4 flex flex-col gap-5">
-            <h1 class="text-4xl font-bold">Bat Radar</h1>
-            <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
-                <div class="shadow p-4 rounded-lg col-span-1 sm:col-span-2 border border-slate-200">
-                    <h2 id="distance" class="text-2xl mb-3">Distance: <span id="distance">0 cm</span></h2>
-                    <div class='w-full bg-gray-100 rounded-3xl h-2.5'>
-                        <div id="distance-bar" class='h-2.5 rounded-3xl transition-all' style='width: 0%'></div>
-                    </div>
-                </div> 
-                <div class="shadow p-4 rounded-lg border border-slate-200">
-                   <h2 class="text-2xl"><span id="collisions">0</span> Collisions</h2> 
-                </div>
-            </div>
-        </body>
-    </html>
-    )";
-    server.send(200, "text/html", html);
+    if (String(topic) == mqtt_topic_led) {
+        // Handle LED control messages if needed
+        if (message == "ON") {
+            digitalWrite(PIN_LED2, HIGH);
+        } else if (message == "OFF") {
+            digitalWrite(PIN_LED2, LOW);
+        }
+    }
 }
 
-void handleData() {
-    JsonDocument doc;    
-    doc["distance"] = lastDistance;
-    doc["collisions"] = collisions;
-    // the closer the distance is to 0 the higher the progress bar is
-    if (lastDistance > 150) {
-        doc["distance-bar"] = 0;
-    } else {
-        doc["distance-bar"] = map(lastDistance, 0, 150, 100, 0);
+void reconnect() {
+    while (!client.connected()) {
+        Serial.print("Attempting MQTT connection...");
+        String clientId = "ESP32Client-" + String(WiFi.macAddress());
+        if (client.connect(clientId.c_str())) {
+            Serial.println("connected");
+            Serial.println(clientId);
+            client.subscribe(mqtt_topic_led);
+        } else {
+            Serial.print("failed, rc= ");
+            Serial.print(client.state());
+            Serial.println(" retrying in 5 seconds");
+            delay(5000);
+        }
+
     }
+}
+
+void updateLED() {
+    if (currentBlinkInterval == 0) {
+        digitalWrite(PIN_LED, LOW);
+        return;
+    }
+    unsigned long currentMillis = millis();
     
-    String response;
-    serializeJson(doc, response);
-    server.send(200, "application/json", response);
+    if (currentMillis - lastBlink >= currentBlinkInterval) {
+        ledState = !ledState;
+        digitalWrite(PIN_LED, ledState ? HIGH : LOW);
+        lastBlink = currentMillis;
+    }
+}
+
+int count = 0;
+void publishSensorData(int distance, unsigned int collisions) {
+    if (count >= 10) {
+        JsonDocument doc;
+        doc["distance"] = distance;
+        doc["collisions"] = collisions;
+        doc["ledState"] = ledState;
+        
+        char buffer[200];
+        serializeJson(doc, buffer);
+        Serial.println("Sending data");
+        Serial.println(client.connected());
+        client.publish(mqtt_topic_distance, buffer);
+        count = 0;
+    }
+
+    count ++;
 }
