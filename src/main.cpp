@@ -1,8 +1,18 @@
 #include <Arduino.h>
-#include <HCSR04.H>
+#include <HCSR04.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <ArduinoJson.h>
+
+const char* ssid = "Sweetjuju";
+const char* password = "jujulien38";
+
+WebServer server(80);
 
 uint16_t getBlinkFrequency(int distance);
 void updateLED();
+void handleRoot();
+void handleData();
 
 const uint8_t PIN_LED = 5;
 const uint8_t PIN_TRIGGER = 15;
@@ -33,10 +43,33 @@ unsigned long lastSensorRead = 0;
 unsigned long lastBlink = 0;
 uint16_t currentBlinkInterval = 0;
 bool ledState = false;
+int lastDistance = 0;
 
 void setup() {
-  pinMode(PIN_LED, OUTPUT);
-  Serial.begin(115200);
+    pinMode(PIN_LED, OUTPUT);
+    Serial.begin(115200);
+  
+    // Setup Wifi
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect();
+    delay(100);
+    WiFi.begin(ssid, password);
+    Serial.println("Connecting to WiFi...");
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print(".");
+    }
+    Serial.println("");
+    Serial.println("WiFi connected");
+    Serial.println("IP address: ");
+    Serial.println(WiFi.localIP());
+    
+    // Setup server routes
+    server.on("/", handleRoot);
+    server.on("/data", handleData);
+    
+    server.begin();
+    Serial.println("HTTP server started");
 }
 
 
@@ -68,14 +101,62 @@ void updateLED() {
 }
  
 void loop() {
+    server.handleClient();
+
     unsigned long currentMillis = millis();
 
     if (currentMillis - lastSensorRead >= SENSOR_READ_INTERVAL) {
-        int distance = distanceSensor.measureDistanceCm();
-        currentBlinkInterval = getBlinkFrequency(distance);
+        lastDistance = distanceSensor.measureDistanceCm();
+        currentBlinkInterval = getBlinkFrequency(lastDistance);
 
         lastSensorRead = currentMillis;
     }
 
     updateLED();
+}
+
+void handleRoot() {
+    String html = R"(
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Distance Sensor Monitor</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+            body { font-family: Arial; text-align: center; margin: 20px; }
+            #distance { font-size: 24px; margin: 20px 0; }
+            #blinkFreq { font-size: 18px; }
+        </style>
+        <script>
+            function updateData() {
+                fetch('/data')
+                    .then(response => response.json())
+                    .then(data => {
+                        document.getElementById('distance').innerHTML = 
+                            'Distance: ' + data.distance + ' cm';
+                        document.getElementById('blinkFreq').innerHTML = 
+                            'Blink Frequency: ' + data.blinkInterval + ' ms';
+                    });
+            }
+            setInterval(updateData, 500);
+        </script>
+    </head>
+    <body>
+        <h1>Distance Sensor Monitor</h1>
+        <div id="distance">Loading...</div>
+        <div id="blinkFreq"></div>
+    </body>
+    </html>
+    )";
+    server.send(200, "text/html", html);
+}
+
+void handleData() {
+    StaticJsonDocument<200> doc;    
+    doc["distance"] = lastDistance;
+    doc["blinkInterval"] = currentBlinkInterval;
+    
+    String response;
+    serializeJson(doc, response);
+    server.send(200, "application/json", response);
 }
